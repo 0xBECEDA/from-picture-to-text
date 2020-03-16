@@ -268,3 +268,157 @@ M-x what-can-i-do чтобы получить список всех помето
 потому что мы можем "войти" в букву в любой точке.
 - Вообще-то можно, но это уже другой способ распознавания (кстати,
   отличная идея). А все шаблоны квадратные, поэтому мы можем выделить буквы)
+
+**** Попытка найти букву клеточным автоматом на картинке
+
+Пробуем найти букву на изображении с помощью клеточного автомата.
+Для начала загрузим все функции в слим из файла snapshot.org, который
+лежит тут:
+https://github.com/0xBECEDA/from-picture-to-text/blob/master/snapshot.org
+
+Демоверсия призвана проверить, работает ли разработанный клеточный
+автомат. Его цель:
+1. найти букву
+2. закрасить ее новым цветом
+3. затем сохраняем картинку.
+
+Чтоб нашему клеточному автомату было попроще, возьмем сначала пипеткой в
+гимпе цвет шрифта на цветном избражении.
+
+Поиск буквы:
+Циклом проходимся по всей картинке.
+Как только встречаем цвет буквы, сразу вызываем клеточный автомат,
+который ищет "соседей" этого пикселя с таким же цветом. Поиск соседей
+заканчивается тогда, когда мы проверили наличие соседей у всех пикселей и
+ничего не нашли.
+После этого цикл включается на том месте, где остановился.
+
+Правила для клеточного автомата:
+. получаем первый пиксель
+. проверяем его соседей: сверху, снизу, слева, справа. Если цвет соседа
+соответсвует цвету буквы, то заносим координаты в очередь
+. берем координаты пикселя из очереди, сразу меняем его цвет,
+анализируем его соседей и заносим их координаты в очередь
+. работа программы прекращается, когда очередь координат пикселей
+оказывается пуста.
+
+#+BEGIN_SRC lisp
+  (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+  (defparameter *new-image-path* "~/r/prj/picture->text/result.png")
+  (defparameter *test-image* (load-png *test-image-path*))
+  (defparameter *queue-of-pixels* (make-queue))
+  (defparameter *max-x* (- (array-dimension *test-image* 0) 1))
+  (defparameter *max-y* (- (array-dimension *test-image* 1) 1))
+
+  (defparameter *r* 224)
+  (defparameter *g* 134)
+  (defparameter *b* 26)
+
+  (defparameter *new-r* 255)
+  (defparameter *new-g* 0)
+  (defparameter *new-b* 0)
+
+
+  (defun needed-pix? (x y r g b image)
+    (if (or (< *max-x* x)
+            (< *max-y* y)
+            (< x 0)
+            (< y 0))
+        nil
+        (progn
+          (format t "x ~A y ~A ~%" x y)
+          (format t "r ~A g ~A b ~A ~%" (aref image y x 0)
+                  (aref image y x 1) (aref image y x 2))
+          (if (and (or (= r (aref image y x 0))
+                       ( <= (abs (- r (aref image y x 0))) 35))
+                   (or (= g (aref image y x 1))
+                       ( <= (abs (- g (aref image y x 1))) 35))
+                   (or (= b (aref image y x 2))
+                       ( <= (abs (- b (aref image y x 2))) 35)))
+              (progn
+              (put-pix (make-pix x y))
+              ;;(format t "car ~A ~%" *queue-of-pixels*)
+              )
+              'not))))
+
+  (defun automat (pixels-queue image)
+    (if (null (car pixels-queue))
+        'done
+        (let* ((cur-pix (get-pix pixels-queue))
+               (cur-x (get-x cur-pix))
+               (cur-y (get-y cur-pix)))
+          ;; меняем цвет пикселя
+          (format t "~A ~%" (length pixels-queue))
+          (setf (aref image cur-y cur-x 0) *new-r*
+                (aref image cur-y cur-x 1) *new-g*
+                (aref image cur-y cur-x 2) *new-b*)
+          ;; проверяем соседей с 4х сторон
+          (needed-pix? (+ cur-x 1) cur-y *r* *g* *b* image)
+          (needed-pix? (- cur-x 1) cur-y *r* *g* *b* image)
+          (needed-pix? cur-x  (+ cur-y 1) *r* *g* *b* image)
+          (needed-pix? cur-x  (- cur-y 1) *r* *g* *b* image)
+          (automat pixels-queue image))))
+
+  (defun test ()
+    (put-pix (make-pix 55 57))
+    (automat *queue-of-pixels* *test-image*)
+    (destructuring-bind (height width colors)
+        (array-dimensions *test-image*)
+      (save-png width height *new-image-path* *test-image*)))
+
+  (test)
+  ;; ;; TEST: saving screenshot data
+  ;; (let* ((to "~/r/prj/picture->text/aaa.png")
+  ;;        (image-data (x-snapshot)))
+  ;;   (destructuring-bind (height width depth)
+  ;;       (array-dimensions image-data)
+  ;;     (save-png width height to image-data)))
+
+  ;; (defun find-letter (image)
+  ;;   <тут будет цикл>
+  ;;   )
+#+END_SRC
+
+Конструктор и селекторы для создания и управления очередью пикселей.
+
+#+BEGIN_SRC lisp
+  (defun make-queue () (cons nil nil))
+
+  (defun enqueue (obj q)
+    (if (null (car q))
+        (setf (cdr q) (setf (car q) (list obj)))
+        (setf (cdr (cdr q)) (list obj)
+              (cdr q) (cdr (cdr q))))
+    (car q))
+
+  (defun dequeue (q)
+    (pop (car q)))
+
+  (defun make-pix (x y)
+    (cons x y))
+
+  (defun put-pix (pix)
+    (enqueue pix *queue-of-pixels*))
+
+  (defun get-x (pix)
+    (car pix))
+
+  (defun get-y (pix)
+    (cdr pix))
+
+  (defun get-pix (queue)
+    (dequeue queue))
+
+  (defun empty-queue? (queue)
+    (and (null (car queue))
+         (null (cdr queue))))
+
+  ;; (defparameter test (make-pix 1 2))
+  ;; (defparameter test2 (make-pix 3 4))
+
+  ;; (put-pix test)
+  ;; (get-pix *queue-of-pixels*)
+
+  ;; (dequeue *queue-of-pixels*)
+
+#+END_SRC

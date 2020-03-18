@@ -293,95 +293,33 @@ https://github.com/0xBECEDA/from-picture-to-text/blob/master/snapshot.org
 ничего не нашли.
 После этого цикл включается на том месте, где остановился.
 
-Правила для клеточного автомата:
-. получаем первый пиксель
-. проверяем его соседей: сверху, снизу, слева, справа. Если цвет соседа
-соответсвует цвету буквы, то заносим координаты в очередь
-. берем координаты пикселя из очереди, сразу меняем его цвет,
-анализируем его соседей и заносим их координаты в очередь
-. работа программы прекращается, когда очередь координат пикселей
-оказывается пуста.
+#+NAME: defs
+#+BEGIN_SRC lisp :noweb yes
+<<queue>>
 
-#+BEGIN_SRC lisp
-  (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
-  (defparameter *new-image-path* "~/r/prj/picture->text/result.png")
-  (defparameter *test-image* (load-png *test-image-path*))
-  (defparameter *queue-of-pixels* (make-queue))
-  (defparameter *max-x* (- (array-dimension *test-image* 0) 1))
-  (defparameter *max-y* (- (array-dimension *test-image* 1) 1))
+(defparameter *queue-of-pixels* (make-queue))
+(defparameter *max-x* (- (array-dimension *test-image* 0) 1))
+(defparameter *max-y* (- (array-dimension *test-image* 1) 1))
 
-  (defparameter *r* 224)
-  (defparameter *g* 134)
-  (defparameter *b* 26)
+(defparameter *r* 224)
+(defparameter *g* 134)
+(defparameter *b* 26)
 
-  (defparameter *new-r* 255)
-  (defparameter *new-g* 0)
-  (defparameter *new-b* 0)
+(defparameter *color-tolerance* 100)
 
+(defparameter *new-r* 255)
+(defparameter *new-g* 0)
+(defparameter *new-b* 0)
 
-  (defun needed-pix? (x y r g b image)
-    (if (or (< *max-x* x)
-            (< *max-y* y)
-            (< x 0)
-            (< y 0))
-        nil
-        (progn
-          (format t "x ~A y ~A ~%" x y)
-          (format t "r ~A g ~A b ~A ~%" (aref image y x 0)
-                  (aref image y x 1) (aref image y x 2))
-          (if (and (or (= r (aref image y x 0))
-                       ( <= (abs (- r (aref image y x 0))) 35))
-                   (or (= g (aref image y x 1))
-                       ( <= (abs (- g (aref image y x 1))) 35))
-                   (or (= b (aref image y x 2))
-                       ( <= (abs (- b (aref image y x 2))) 35)))
-              (progn
-              (put-pix (make-pix x y))
-              ;;(format t "car ~A ~%" *queue-of-pixels*)
-              )
-              'not))))
+<<needed-pix?>>
 
-  (defun automat (pixels-queue image)
-    (if (null (car pixels-queue))
-        'done
-        (let* ((cur-pix (get-pix pixels-queue))
-               (cur-x (get-x cur-pix))
-               (cur-y (get-y cur-pix)))
-          ;; меняем цвет пикселя
-          (format t "~A ~%" (length pixels-queue))
-          (setf (aref image cur-y cur-x 0) *new-r*
-                (aref image cur-y cur-x 1) *new-g*
-                (aref image cur-y cur-x 2) *new-b*)
-          ;; проверяем соседей с 4х сторон
-          (needed-pix? (+ cur-x 1) cur-y *r* *g* *b* image)
-          (needed-pix? (- cur-x 1) cur-y *r* *g* *b* image)
-          (needed-pix? cur-x  (+ cur-y 1) *r* *g* *b* image)
-          (needed-pix? cur-x  (- cur-y 1) *r* *g* *b* image)
-          (automat pixels-queue image))))
-
-  (defun test ()
-    (put-pix (make-pix 55 57))
-    (automat *queue-of-pixels* *test-image*)
-    (destructuring-bind (height width colors)
-        (array-dimensions *test-image*)
-      (save-png width height *new-image-path* *test-image*)))
-
-  (test)
-  ;; ;; TEST: saving screenshot data
-  ;; (let* ((to "~/r/prj/picture->text/aaa.png")
-  ;;        (image-data (x-snapshot)))
-  ;;   (destructuring-bind (height width depth)
-  ;;       (array-dimensions image-data)
-  ;;     (save-png width height to image-data)))
-
-  ;; (defun find-letter (image)
-  ;;   <тут будет цикл>
-  ;;   )
 #+END_SRC
 
-Конструктор и селекторы для создания и управления очередью пикселей.
+Конструктор и селекторы для создания и управления очередью пикселей и
+самими пикселями.
 
-#+BEGIN_SRC lisp
+#+NAME: queue
+#+BEGIN_SRC lisp :noweb yes
   (defun make-queue () (cons nil nil))
 
   (defun enqueue (obj q)
@@ -421,4 +359,261 @@ https://github.com/0xBECEDA/from-picture-to-text/blob/master/snapshot.org
 
   ;; (dequeue *queue-of-pixels*)
 
+#+END_SRC
+
+Функция проверки цвета конкретного пикселя.
+Пока что заточена только под полноцветное изображение, т.е. сравнивается
+RGB текущего пикселя и заданный RGB буквы. Если цвет пикселя нам
+подходит, его координаты отправляются в очередь для дальнейшей
+обработки.
+
+#+NAME: needed-pix?
+#+BEGIN_SRC lisp :noweb yes
+  (defun needed-pix? (x y r g b image)
+    (if (or (< *max-x* x)
+            (< *max-y* y)
+            (< x 0)
+            (< y 0))
+        nil
+        (progn
+          ;; (format t "x ~A y ~A ~%" x y)
+          ;; (format t "r ~A g ~A b ~A ~%" (aref image y x 0)
+          ;;        (aref image y x 1) (aref image y x 2))
+          (if (and (or (= r (aref image y x 0))
+                       ( <= (abs (- r (aref image y x 0))) *color-tolerance*))
+                   (or (= g (aref image y x 1))
+                       ( <= (abs (- g (aref image y x 1))) *color-tolerance*))
+                   (or (= b (aref image y x 2))
+                       ( <= (abs (- b (aref image y x 2))) *color-tolerance*)))
+              (progn
+                (put-pix (make-pix x y))
+                t
+                ;;(format t "car ~A ~%" *queue-of-pixels*)
+                )
+              nil))))
+#+END_SRC
+
+Правила для клеточного автомата:
+- получаем первый пиксель из очереди
+- закрашиваем его
+- проверяем его соседей: сверху, снизу, слева, справа.
+- берем следующий пиксель из очереди
+
+Работа функции прекращается, когда очередь координат пикселей
+оказывается пуста. Это означает, что обработка текущего символа закончилась.
+
+К этому механизму добавилась важная деталь: мы будем сохранять крайние
+точки найденной буквы, что упростит нам работу с ней. Для этого мы будем
+пользоваться специальными структурами, их массивом и функцией ~check-sides~, об
+устройстве которых будет сказано ниже. По окончанию работы мы просто
+вернем готовую структуру.
+
+#+NAME: automat
+#+BEGIN_SRC lisp :noweb yes
+    (defun automat (pixels-queue cur-struct image)
+    (if (null (car pixels-queue))
+        (progn
+          (format t " automat: done struct ~A ~%" cur-struct)
+          cur-struct
+          )
+        (let* ((cur-pix (get-pix pixels-queue))
+               (cur-x (get-x cur-pix))
+               (cur-y (get-y cur-pix)))
+          ;;(format t " automat: struct ~A ~%" cur-struct)
+          ;;(format t " automat: cur-pix ~A ~%" cur-pix)
+          (setf cur-struct (check-sides cur-pix cur-struct))
+          ;; меняем цвет пикселя
+          ;;(format t "~A ~%" (length pixels-queue))
+          (setf (aref image cur-y cur-x 0) *new-r*
+                (aref image cur-y cur-x 1) *new-g*
+                (aref image cur-y cur-x 2) *new-b*)
+          ;; проверяем соседей с 4х сторон
+          (needed-pix? (+ cur-x 1) cur-y *r* *g* *b* image)
+          (needed-pix? (- cur-x 1) cur-y *r* *g* *b* image)
+          (needed-pix? cur-x  (+ cur-y 1) *r* *g* *b* image)
+          (needed-pix? cur-x  (- cur-y 1) *r* *g* *b* image)
+          (automat pixels-queue cur-struct image))))
+
+#+END_SRC
+
+Цикл, который проходится по всей картинке ряд за рядом в поисках точки
+вхождения в символ. Если точка найдена, то мы вызываем ~automat~,
+передаем ему пустую структуру для дальнейшей работы с символом.
+После окончания работы ~automat~ мы кладем структуру в массив и
+продолжаем поиск с того места, где остановились.
+
+#+NAME: find-letter
+#+BEGIN_SRC lisp :noweb yes
+(defun find-letter (image)
+  (do ((x 0 (incf x)))
+      ((= x *max-x*))
+    (do ((y 0 (incf y)))
+        ((= y *max-y*))
+      (if (needed-pix? x y *r* *g* *b* image)
+          (let ((cur-struct (aref *array-of-letters* *array-of-letters-indx*)))
+            (setf (aref *array-of-letters* *array-of-letters-indx*)
+                  (automat *queue-of-pixels* cur-struct *test-image*))
+            (incf *array-of-letters-indx*))))))
+
+#+END_SRC
+
+**** Создание шаблонов.
+
+Немного усовершенствуем идею клеточного автомата. Раньше он просто
+закрашивал буквы, теперь его задача - сохранить крайние точки букв. Так
+мы сможем правильно высчитать размер буквы и без проблем вырезать ее из
+общей картинки, получив таким образом наш шаблон.
+К тому же, сохранение координат позволяет нам избавиться от минимум 2х
+проблем:
+- Чтоб сравнить шаблоны с буквами, не нужно будет заново
+  проходить по картинке. Просто будем брать структуру с координатами и
+накладывать шаблон прямо на это место на картинке
+- Оптимизация скорости распознавания буквы и шаблона.
+Буквы бывают разного размера. Зная крайние точки буквы, можно посчитать
+высоту и ширину буквы. А значит, мы не будем пытаться наложить шаблон "m"
+на букву "i", поскольку у них принципиально разные размеры.
+
+Как сохранить крайние координаты букв?
+- создаем структуру для каждой буквы
+- при анализе пикселей будем сверять их координаты с уже имеющимися в
+  структуре, если структура как-то заполнена, конечно
+  по окончанию работы над буквой, мы должны получить заполненную полностью
+  структуру буквы и положить ее в массив.
+
+#+NAME: array_of_letters
+#+BEGIN_SRC lisp :noweb yes
+  (defstruct letter
+    up down left right)
+
+  (defconstant *array-of-letters* (make-array 500))
+
+#+END_SRC
+
+Массив будем сразу заполнять пустыми структурами, а затем просто
+заполнять их поля. Так же заведем индекс заполнения массива, чтоб не
+приходилось каждый раз проходить по массиву в поиске незаполненной
+структуры.
+
+#+NAME: fill_array
+#+BEGIN_SRC lisp :noweb yes
+(dotimes (i 500)
+    (setf (aref *array-of-letters* i) (make-letter)))
+#+END_SRC
+
+Можно было бы использовать пулл, но пришлось бы все равно писать в пулл
+как в обычный массив, потому что если использовать ~vector-pop~ и
+~vector-push~, то мы будем при каждом вызове ~automat~ использовать одну
+и ту же структуру. Чтобы этого не делать, пришлось бы сначала ждать, пока
+мы проанализируем вообще все символы и только потом класть их в пулл. К
+тому же, всегда можно забыть, как нетипично  мы используем пулл, и
+получить сложно отслеживаемые ошибки.
+
+Подробнее о сравнении координат пикселя и координат крайних точек буквы.
+У нас может возникнуть 2 сценария:
+1. Мы встречем пустой слот.
+Если это так, то просто запишем туда координаты пикселя. При последующем
+анализе буквы, слот скорее всего будет переписан. Но нам очень важно,
+чтоб все 4 слота структуры были заполнены какими-то координатами, иначе
+размеры буквы посчитать будет невозможно.
+
+2. В остальных случаях мы действуем по следующему сценарию:
+Мы последоватльено сравниваем ~x~ координату текущего пикселя с ~x~
+координатами полей ~left~ и ~reight~, а ~y~ координату сравниваем с ~y~
+координатой полей ~up~ ~down~.
+Зачем мы это делаем? Дело в том, что один и тот же пиксель может
+оказаться и самым верхним, и самым правым, например. Соотвтетсвенно, он
+должен попасть и в поле ~up~, и в поле ~right~. В противном случае
+структура не будет отражать реальных размеров буквы.
+Обрати внимание, что для проверки условий используется
+~progn~,объединяющий ифы в единое выражение, а не ~cond~, поскольку
+~cond~ прекратил бы проверять условия, как только одно из них сработало
+бы. А нам нужно, чтоб проверились все.
+Для удобства ~check-sides~ будет возвращать измененную структуру.
+
+#+NAME: check_sides
+#+BEGIN_SRC lisp :noweb yes
+  <<array_of_letters>>
+
+  (defun check-sides (pix struct)
+    (progn
+      (if (or (null (letter-up struct))
+              (< (get-y pix) (get-y (letter-up struct))))
+          (setf (letter-up struct) pix))
+      (if (or (null (letter-down struct))
+              (> (get-y pix) (get-y (letter-down struct))))
+          (setf (letter-down struct) pix))
+      (if (or (null (letter-left struct))
+              (< (get-x pix) (get-x (letter-left struct))))
+          (setf (letter-left struct) pix))
+      (if (or (null (letter-right struct))
+              (> (get-x pix) (get-x (letter-right struct))))
+          (progn
+            (setf (letter-right struct) pix)
+            struct)
+          struct)))
+
+  <<automat>>
+
+  ;; ТЕСТ на заполнение пустой структуры с последующим переписыванием слотов
+  ;; (let ((cur-struct (aref *array-of-letters* 1)))
+  ;;   (check-sides (make-pix 90 90) cur-struct)
+  ;;   (format t "~A ~% "cur-struct)
+  ;;   (check-sides (make-pix 30 40) cur-struct)
+  ;;   (format t "~A ~% "cur-struct)
+  ;;   (check-sides (make-pix 12 0) cur-struct)
+  ;;   (format t "~A ~% "cur-struct)
+  ;;   (check-sides (make-pix 14 32) cur-struct)
+  ;;   (format t "~A ~% "cur-struct)
+  ;;   (check-sides (make-pix 14 100) cur-struct)
+  ;;   (format t "~A ~% "cur-struct)
+  ;;   )
+
+#+END_SRC
+
+**** Запуск
+
+На данный вид существует 2 варианта запуска: с циклом и без. Без цикла
+удобно запускать, когда нужно протестить систему и отслеить правильность
+всех значений. Можно "натравить" автомат на конкретную букву,
+предварительно узнав ее координаты в гимпе, и сравнить ожидаемую модель
+поведения  среальностью.
+
+#+NAME: tests
+#+BEGIN_SRC lisp :noweb yes
+
+  ;; (defun test ()
+  ;;   (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+  ;;   (defparameter *test-image* (load-png *test-image-path*))
+  ;;   <<array_of_letters_index>>
+  ;;   <<fill_array>>
+  ;;   (put-pix (make-pix 207 40))
+  ;;   (let ((cur-struct (aref *array-of-letters* 0)))
+  ;;     (setf (aref *array-of-letters* *array-of-letters-indx*)
+  ;;           (automat *queue-of-pixels* cur-struct *test-image*))
+  ;;   (destructuring-bind (height width colors)
+  ;;       (array-dimensions *test-image*)
+  ;;     (save-png width height *new-image-path* *test-image*))))
+
+  (defun test ()
+    (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+    (defparameter *test-image* (load-png *test-image-path*))
+    <<array_of_letters_index>>
+    <<fill_array>>
+    (find-letter *test-image*)
+    (destructuring-bind (height width colors)
+        (array-dimensions *test-image*)
+      (save-png width height *new-image-path* *test-image*)))
+
+  (test)
+
+#+END_SRC
+
+**** Сборка
+
+#+NAME: recognition
+#+BEGIN_SRC lisp :tangle code-file.lisp :noweb yes tangle :exports code :padline no :comments none
+<<defs>>
+<<check_sides>>
+<<find-letter>>
+<<tests>>
 #+END_SRC

@@ -413,7 +413,7 @@ RGB текущего пикселя и заданный RGB буквы. Если
     (defun automat (pixels-queue cur-struct image)
     (if (null (car pixels-queue))
         (progn
-          (format t " automat: done struct ~A ~%" cur-struct)
+          ;;(format t " automat: done struct ~A ~%" cur-struct)
           cur-struct
           )
         (let* ((cur-pix (get-pix pixels-queue))
@@ -433,7 +433,6 @@ RGB текущего пикселя и заданный RGB буквы. Если
           (needed-pix? cur-x  (+ cur-y 1) *r* *g* *b* image)
           (needed-pix? cur-x  (- cur-y 1) *r* *g* *b* image)
           (automat pixels-queue cur-struct image))))
-
 #+END_SRC
 
 Цикл, который проходится по всей картинке ряд за рядом в поисках точки
@@ -455,6 +454,7 @@ RGB текущего пикселя и заданный RGB буквы. Если
                   (automat *queue-of-pixels* cur-struct *test-image*))
             (incf *array-of-letters-indx*))))))
 
+<<crop_pattern>>
 #+END_SRC
 
 **** Создание шаблонов.
@@ -475,6 +475,7 @@ RGB текущего пикселя и заданный RGB буквы. Если
 
 Как сохранить крайние координаты букв?
 - создаем структуру для каждой буквы
+- создаем массив для хранения этих структур
 - при анализе пикселей будем сверять их координаты с уже имеющимися в
   структуре, если структура как-то заполнена, конечно
   по окончанию работы над буквой, мы должны получить заполненную полностью
@@ -485,19 +486,26 @@ RGB текущего пикселя и заданный RGB буквы. Если
   (defstruct letter
     up down left right)
 
-  (defconstant *array-of-letters* (make-array 500))
-
+  (defconstant *array-of-letters* (make-array *array-of-letters-amount*))
 #+END_SRC
 
 Массив будем сразу заполнять пустыми структурами, а затем просто
 заполнять их поля. Так же заведем индекс заполнения массива, чтоб не
 приходилось каждый раз проходить по массиву в поиске незаполненной
-структуры.
+структуры, и переменную, отображающую размер массива. Таким образом не
+придется вручную менять размер массива во всех тестах программы.
 
 #+NAME: fill_array
 #+BEGIN_SRC lisp :noweb yes
-(dotimes (i 500)
+(dotimes (i *array-of-letters-amount*)
     (setf (aref *array-of-letters* i) (make-letter)))
+#+END_SRC
+
+#+NAME: array_of_letters_index
+#+BEGIN_SRC lisp :noweb yes
+  (defparameter *array-of-letters-indx* 0)
+
+ (defconstant *array-of-letters-amount* 500)
 #+END_SRC
 
 Можно было бы использовать пулл, но пришлось бы все равно писать в пулл
@@ -570,13 +578,135 @@ RGB текущего пикселя и заданный RGB буквы. Если
 
 #+END_SRC
 
+**** Вырезание шаблонов.
+Теперь, когда мы пjлучили координатs каждой буквы - а буквой мы считаем
+все, что не фон, - мы можем написать функцию, которая будет вырезать
+шаблон из каринки и сохранять его в папку.
+
+Для вырезания шаблона мы будем копировать нужные пиксели в отдельный
+массив и сохранять его. Поскольку у нас координаты букв записаны без
+всякого "запаса", то чтоб вырезать букву правильно, не обрубив ее
+последние пиксели, мы прибавим пару пикселей к границам, если это
+возможно. Мы же не хотим  вылететь за границы массива.
+
+Ширина буквы рассчитывается как разница между ккординатами ~x~ левого и
+правого края, а высота - как разница между ~y~ координатами верхнего и
+нижнего края.
+
+~crop-pattern~ универсален, поскольку принимает структуру пикселя и
+массив пикселей изображения, из которого мы вырезаем шаблон. Единственное
+ограничение: структура должна быть типа ~letter~, а массив должен
+содержать пиксели изображения.
+
+#+NAME: crop_pattern
+#+BEGIN_SRC lisp :noweb yes
+  (defun crop-pattern (pix-struct image)
+    (let* ((up (letter-up pix-struct))
+           (down (letter-down pix-struct))
+           (right (letter-right pix-struct))
+           (left (letter-left pix-struct))
+           (y-start (if (or (= (get-y up) 0) (= (get-y up) 1))
+                        (get-y up)
+                        (- (get-y up) 2)))
+           (x-start (if (or (= (get-x left) 0) (= (get-x left) 1))
+                        (get-x left)
+                        (- (get-x left) 2)))
+           (y-end (if (or (= (get-y down) *max-y*) (= (get-y down) (- *max-y* 1)))
+                      (get-y down)
+                      (+ (get-y down) 2)))
+           (x-end (if (or (= (get-x right) *max-x*) (= (get-x right) (- *max-x* 1)))
+                      (get-x right)
+                      (+ (get-x right) 2)))
+           (height-pattern (- y-end y-start))
+           (width-pattern (- x-end x-start))
+           (colors-pattern 4)
+           (pattern-dims (list height-pattern width-pattern colors-pattern))
+           (pattern-image (make-array pattern-dims :element-type '(unsigned-byte 8))))
+      (format t "pattern dims ~A ~%" pattern-dims)
+      (format t "struct ~A ~%" pix-struct)
+      (do ((image-y y-start (incf image-y))
+           (pattern-y 0 (incf pattern-y)))
+          ((= image-y y-end))
+        (do ((image-x x-start (incf image-x))
+             (pattern-x 0 (incf pattern-x)))
+            ((= image-x x-end))
+          (do ((z 0 (incf z)))
+              ((= z colors-pattern))
+            ;; (format t "mx ~A my ~A  px ~A py ~A ~%" image-x image-y
+            ;;         pattern-x pattern-y)
+            ;; (format t "mx ~A my ~A  px ~A py ~A ~%" image-x image-y
+            ;;         pattern-x pattern-y)
+            (setf (aref pattern-image pattern-y pattern-x z)
+                  (aref image image-y image-x z)))))
+      pattern-image))
+
+  ;; TECT для проверки crop-pattern отдельно от системы
+  (defun test-crop-alone ()
+    (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+    (defparameter *test-image* (load-png *test-image-path*))
+    (defparameter *pattern-image-path* "~/r/prj/picture->text/pattern.png")
+    (let ((struct (make-letter)))
+      (setf (letter-up struct) (make-pix 90 0)
+            (letter-down struct) (make-pix 90 50)
+            (letter-left struct) (make-pix 100 0)
+            (letter-right struct) (make-pix 150 80))
+      ;;(defparameter pattern (crop-pattern struct *test-image*))))
+       ;; (aref pattern 49 53 0)
+      (let ((pattern (crop-pattern struct *test-image*)))
+        (destructuring-bind (height  width  &optional colors)
+            (array-dimensions pattern)
+          (format t "pattern dims ~A ~A ~A ~%" height  width colors)
+          (save-png width height *pattern-image-path* pattern)))))
+
+  ;; (test-crop-alone)
+
+  ;;ТЕСТ crop со всей системой без цикла
+  (defun test-crop-with-system ()
+    (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+    (defparameter *pattern-image-path* "~/r/prj/picture->text/pattern.png")
+    (defparameter *test-image* (load-png *test-image-path*))
+    <<array_of_letters_index>>
+    <<fill_array>>
+    (find-letter *test-image*)
+    (let ((pattern (crop-pattern (aref *array-of-letters* 0) *test-image*)))
+      (destructuring-bind (height  width  &optional colors)
+          (array-dimensions pattern)
+        (save-png width height *pattern-image-path* pattern))))
+
+  ;; (test-crop-with-system)
+
+  ;; ТЕСТ crop-pattern со всей системой: задача вырезать все шаблоны по координатам в массиве
+  (defun test-crop-with-system-in-cycle ()
+    (defparameter *test-image-path* "~/r/prj/picture->text/aaa.png")
+    (defparameter *test-image* (load-png *test-image-path*))
+    (defparameter *array-of-letters-indx* 0)
+    (dotimes (i *array-of-letters-amount*)
+      (setf (aref *array-of-letters* i) (make-letter)))
+    (find-letter *test-image*)
+    (do ((i 0 (incf i)))
+        ((= i *array-of-letters-amount*) 'done)
+      (let* ((cur-struct (aref *array-of-letters* i))
+             (pattern (if (letter-up cur-struct)
+                          (crop-pattern cur-struct *test-image*)
+                          nil)))
+        (if pattern
+            (destructuring-bind (height width  &optional colors)
+                (array-dimensions pattern)
+              (save-png width height (format nil
+                                             "/home/ss/r/prj/picture->text/patterns/pattern~A.png"
+                                             i)
+                        pattern))
+            (return-from test-crop-with-system-in-cycle 'done)))))
+  ;; (test-crop-with-system-in-cycle)
+#+END_SRC
+
 **** Запуск
 
 На данный вид существует 2 варианта запуска: с циклом и без. Без цикла
-удобно запускать, когда нужно протестить систему и отслеить правильность
+удобно запускать, когда нужно протестить систему и отследить правильность
 всех значений. Можно "натравить" автомат на конкретную букву,
 предварительно узнав ее координаты в гимпе, и сравнить ожидаемую модель
-поведения  среальностью.
+поведения с реальностью.
 
 #+NAME: tests
 #+BEGIN_SRC lisp :noweb yes

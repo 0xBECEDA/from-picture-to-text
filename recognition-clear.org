@@ -1,0 +1,1343 @@
+#+STARTUP: showall indent hidestars
+
+** Общее описание механизма распознавание текста на картинке
+
+   Человек, читая текст, концентрируется только на самом тексте, никак не
+   сосредотачиваясь на фоне. Чтоб распознать буквы с картинки и перевести их
+   в текст, мы будем действовать похожим образом.
+
+   Проще всего найти текст по цвету.
+   Сначала найдем в гимпе пипеткой возьмем цвет шрифта и вручную запишем его
+   RGB в глобальные переменные. Затем пройдемся циклом по картинке и проверм
+   каждый ее пиксель. Если цвет конкретного пикселя совпадает с заданным
+   RGB, то мы будем считать, что наткнулись на символ текста. А значит можно
+   поискать еще пиксели вокруг найденного и таким образом найти весь символ
+   текста.
+
+   Символом текста мы считаем все, что не является фоном. То есть буквы,
+   цифры, знаки препинания и т.д.
+
+   Найдя все символы на картинке, мы вырежем каждый из них, затем уберем
+   одинаковые и таким образом шаблоны, которые мы будем накладывать на каждый
+   символ в дальнейшем. Если шалон и символ совпали, значит, символ
+   распознан и его можно записать в выходной файл.
+
+** WARNING!
+   Нужно загруить данный фал в слим, в нем находятся функции для работы с
+   изображениями.
+
+   https://github.com/0xBECEDA/from-picture-to-text/blob/master/snapshot.org
+
+  ~Внимание!~
+   Мой тестовый пример (картинка) получена с помощью функции ~x-snapshot~
+   из файла ~snapshot.org~, который находится по ссылке выше. Скриншоты,
+   сделанные с помощью нажатия "принст скрин", не обрабатываются
+   корректно функциями библиотеки png, использованной в ~snapsot.org~.
+   Возможно, у тебя будет так же. Попробуй запустить с моим примером или
+   сделать свой.
+
+   Поменяй пути в глобальном параметре *test-image-path* на свой!
+** Механизм поиска букв в детялях.
+
+  Для корректного поиска символов на картинке, нам необходимо:
+   - знать цвет текста (берем пипеткой в гимпе)
+   - найти точку вхождения в каждый символ
+   - сохранить координаты найденных точек вхождения в символов
+   - обработать все точки вхождения (посмотреть, есть ли вокруг них еще
+     точки такого же цвета)
+
+   С взятием цвета пипеткой все ясно.
+   Чтоб найти точку вхождения в символ, мы запустим цикл, который будет
+   проходиться по картинке и сравнивать цвет каждого пикселя с заданным.
+   В случае нахождения пикселя нужного цвета, мы записываем координаты
+   найденного пикселя в очередь, останавливае цикл и вызываем клеточный
+   автомат, который должен найти все пиксели вокруг заданного и перекрасить
+   их в другой цвет.
+   Таким образом предотвращается повторная обработка одних и тех пикселей.
+   После выхода из клеточного автомата, мы возобновляем цикл с того же
+   места, где остановились.
+   Очередь удобна для хранения координат найденных пикселей, посольку таким
+   образом есть возможность обрабатывать их в порядке нахождения.
+
+
+**** Глобальные параметры
+
+   Сначала установим параметры, которые будут необходимы нам для работы всей
+   системы:
+   - путь к анализируемой картинке ~*test-image-path*~
+   - массив пикселей картинки ~*test-image*~
+   - максимальные координаты ~x~ и ~y~, т.е. предел картинки по высоте и
+     ширине
+   - значения rgb текста, который по умолчанию равны 0
+   - погрешность цвета ~*color-tolerance*~, которая по умолчанию = 100
+     Практически везде используется сглаживание шрифтов, которое
+     человеческий глаз не различает, а вот с точки зрения компьютера цвтеа
+     оказываются разные, таким образом если погрешность не допускается, то
+     будут распознаваться отдельные пиксели буквы, а не буква целиком.
+   - новое значение rgb, которое будет использоваться, чтоб перекрасить текст
+     картинки
+
+   #+NAME: defs
+   #+BEGIN_SRC lisp :noweb yes
+     <<queue>>
+
+     (defparameter *test-image-path* "~/r/prj/picture->text/test.png")
+     (defparameter *test-image* (load-png *test-image-path*))
+     (defparameter *new-image-path* "~/r/prj/picture->text/result.png")
+     <<array_of_letters_index>>
+
+     (defparameter *queue-of-pixels* (make-queue))
+     (defparameter *max-x* 0)
+     (defparameter *max-y* 0)
+
+     (defparameter *r* 0)
+     (defparameter *g* 0)
+     (defparameter *b* 0)
+
+     (defparameter *color-tolerance* 100)
+
+     (defparameter *new-r* 255)
+     (defparameter *new-g* 0)
+     (defparameter *new-b* 0)
+
+     <<needed-pix?>>
+
+   #+END_SRC
+
+**** Функции для работы с очередью и пикселями
+
+   Так же нам понадобятся конструкторы и селекторы для создания и управления
+   очередью пикселей и представлением пикселей как точкой координат.
+
+   ~make-queue~ - создает пустую очередь
+   ~enqueue~ - добавляет элемент в очередь
+   ~dequeue~ - убирает элемент из очереди
+   ~empty-queue?~ - проверяет, пустая ли очередь
+   ~make-pix~ - создает представление пикселя как конс-пару из ~x~ и ~y~ координат
+   ~put-pix~ - пушит пиксель в хвост очереди
+   ~get-pix~ - забирает пиксель с головы очереди
+   ~get-x~ - получаем ~x~-координату пикселя
+   ~get-y~ получаем ~y~-координату пикселя
+
+   #+NAME: queue
+   #+BEGIN_SRC lisp :noweb yes
+     (defun make-queue () (cons nil nil))
+
+     (defun enqueue (obj q)
+       (if (null (car q))
+           (setf (cdr q) (setf (car q) (list obj)))
+           (setf (cdr (cdr q)) (list obj)
+                 (cdr q) (cdr (cdr q))))
+       (car q))
+
+     (defun dequeue (q)
+       (pop (car q)))
+
+     (defun make-pix (x y)
+       (cons x y))
+
+     (defun put-pix (pix)
+       (enqueue pix *queue-of-pixels*))
+
+     (defun get-x (pix)
+       (car pix))
+
+     (defun get-y (pix)
+       (cdr pix))
+
+     (defun get-pix (queue)
+       (dequeue queue))
+
+     (defun empty-queue? (queue)
+       (and (null (car queue))
+            (null (cdr queue))))
+
+     ;; (defparameter test (make-pix 1 2))
+     ;; (defparameter test2 (make-pix 3 4))
+
+     ;; (put-pix test)
+     ;; (get-pix *queue-of-pixels*)
+
+     ;; (dequeue *queue-of-pixels*)
+
+   #+END_SRC
+
+**** Проферка цвета конкретного пикселя
+
+   Функция проверки цвета конкретного пикселя.
+   Пока что заточена только под полноцветное изображение, т.е. сравнивается
+   RGB текущего пикселя и заданный RGB буквы. Если цвет пикселя нам
+   подходит, его координаты отправляются в очередь для дальнейшей
+   обработки.
+
+   #+NAME: needed-pix?
+   #+BEGIN_SRC lisp :noweb yes
+     (defun needed-pix? (x y r g b image)
+       (if (or (< *max-x* x)
+               (< *max-y* y)
+               (< x 0)
+               (< y 0))
+           nil
+           (progn
+             ;; (format t "x ~A y ~A ~%" x y)
+             ;; (format t "r ~A g ~A b ~A ~%" (aref image y x 0)
+             ;;        (aref image y x 1) (aref image y x 2))
+             (if (and (or (= r (aref image y x 0))
+                          ( <= (abs (- r (aref image y x 0))) *color-tolerance*))
+                      (or (= g (aref image y x 1))
+                          ( <= (abs (- g (aref image y x 1))) *color-tolerance*))
+                      (or (= b (aref image y x 2))
+                          ( <= (abs (- b (aref image y x 2))) *color-tolerance*)))
+                 (progn
+                   (put-pix (make-pix x y))
+                   t
+                   ;;(format t "car ~A ~%" *queue-of-pixels*)
+                   )
+                 nil))))
+   #+END_SRC
+
+**** Клеточный автомат
+
+   Теперь можно написать сам клеточный автомат, который находит и
+   перекрашивает символы на картинке.
+
+   При дальнейшем написании программы выяснилось, что нам хорошо бы помнить,
+   где какой символ находится на картинке, чтоб не искать их снова.
+   Поэтому мы не только будем перекрашивать буквы в другой цвет, но и будем
+   сохранять координаты крайних точек символа, таким образом получая его
+   границы сверху, снизу, слева и справа.
+
+   Структура и массив для хранения координат символов будут описаны ниже.
+
+   Поэтому ~automat~ будет принимать:
+   - очередь пикселей
+   - пустую структуру
+   - массив изображения, на котором ведется поиск символов
+
+   Правила для клеточного автомата:
+   - получаем первый пиксель из очереди
+   - меняем его цвет
+   - проверяем его соседей: сверху, снизу, слева, справа. Если их цвет
+     совпадет с искомым, то ~needed-pix?~ отправит их координаты в очередь
+   - берем следующий пиксель из очереди
+
+   Работа функции прекращается, когда очередь координат пикселей
+   оказывается пуста. Это означает, что обработка текущего символа
+   закончилась.
+
+
+   #+NAME: automat
+   #+BEGIN_SRC lisp :noweb yes
+     (defun automat (pixels-queue cur-struct image)
+     (if (null (car pixels-queue))
+         (progn
+           ;;(format t " automat: done struct ~A ~%" cur-struct)
+           cur-struct
+           )
+         (let* ((cur-pix (get-pix pixels-queue))
+                (cur-x (get-x cur-pix))
+                (cur-y (get-y cur-pix)))
+           ;;(format t " automat: struct ~A ~%" cur-struct)
+           ;;(format t " automat: cur-pix ~A ~%" cur-pix)
+           (setf cur-struct (check-sides cur-pix cur-struct))
+           ;; меняем цвет пикселя
+           ;;(format t "~A ~%" (length pixels-queue))
+           (setf (aref image cur-y cur-x 0) *new-r*
+                 (aref image cur-y cur-x 1) *new-g*
+                 (aref image cur-y cur-x 2) *new-b*)
+           ;; проверяем соседей с 4х сторон
+           (needed-pix? (+ cur-x 1) cur-y *r* *g* *b* image)
+           (needed-pix? (- cur-x 1) cur-y *r* *g* *b* image)
+           (needed-pix? cur-x  (+ cur-y 1) *r* *g* *b* image)
+           (needed-pix? cur-x  (- cur-y 1) *r* *g* *b* image)
+           (automat pixels-queue cur-struct image))))
+
+     (defun test-automat-alone (test-image-path new-image-path amount-of-structs r g b)
+       (setf *test-image-path* test-image-path
+             ,*new-image-path* new-image-path
+             ,*test-image* (load-png *test-image-path*)
+             ,*array-of-letters-indx* 0
+             ,*array-of-letters-amount* amount-of-structs
+             ,*max-x* (- (array-dimension *test-image* 1) 1)
+             ,*max-y* (- (array-dimension *test-image* 0) 1)
+             ,*r* r
+             ,*b* b
+             ,*g* g)
+       <<fill_array>>
+       (put-pix (make-pix 207 40))
+       (let ((cur-struct (aref *array-of-letters* 0)))
+         (setf (aref *array-of-letters* *array-of-letters-indx*)
+               (automat *queue-of-pixels* cur-struct *test-image*))
+         (destructuring-bind (height width colors)
+             (array-dimensions *test-image*)
+           (save-png width height *new-image-path* *test-image*))))
+
+     ;; (test-automat-alone "~/r/prj/picture->text/aaa.png" "~/r/prj/picture->text/result.png"
+     ;;                     100 248 121 29)
+
+     (defun test-automat-with-find-letter (test-image-path new-image-path amount-of-structs
+                                           r g b)
+       (setf *test-image-path* test-image-path
+             ,*new-image-path* new-image-path
+             ,*test-image* (load-png *test-image-path*)
+             ,*array-of-letters-indx* 0
+             ,*array-of-letters-amount* amount-of-structs
+             ,*max-x* (- (array-dimension *test-image* 1) 1)
+             ,*max-y* (- (array-dimension *test-image* 0) 1)
+             ,*r* r
+             ,*b* b
+             ,*g* g)
+       <<fill_array>>
+       (find-letter *test-image*)
+       (destructuring-bind (height width colors)
+           (array-dimensions *test-image*)
+         (save-png width height *new-image-path* *test-image*)))
+
+     ;; (test-automat-with-find-letter
+     ;;  "~/r/prj/picture->text/aaa.png" "~/r/prj/picture->text/result.png" 500 248 121 29)
+
+   #+END_SRC
+
+**** Цикл обработки
+
+   Цикл, который проходится по всей картинке ряд за рядом в поисках точки
+   вхождения в символ. Если точка найдена, то мы вызываем ~automat~,
+   передаем ему пустую структуру для дальнейшей работы с символом.
+   После окончания работы ~automat~ мы кладем структуру в массив и
+   продолжаем поиск с того места, где остановились.
+
+   #+NAME: find-letter
+   #+BEGIN_SRC lisp :noweb yes
+     (defun find-letter (image)
+       (do ((x 0 (incf x)))
+           ((= x *max-x*))
+         (do ((y 0 (incf y)))
+             ((= y *max-y*))
+           (if (needed-pix? x y *r* *g* *b* image)
+               (let ((cur-struct (aref *array-of-letters* *array-of-letters-indx*)))
+                 (setf (aref *array-of-letters* *array-of-letters-indx*)
+                       (automat *queue-of-pixels* cur-struct *test-image*))
+                 (incf *array-of-letters-indx*))))))
+
+     <<crop_pattern>>
+   #+END_SRC
+
+** Создание шаблонов.
+
+   Раз мы нашли все символы на картинке, теперь можно заняться вырезанием
+   шаблонов.
+
+   Чтоб вырезать шаблон - символ - нужно знать его границы, размер. Вот
+   тут-то нам и понадобятся крайние точки символов, которые мы сохраняли на
+   этапе поиска и выделения символов.
+
+   Сохранение координат позволяет нам избавиться от минимум 2х
+   проблем:
+   - Чтоб вырезать шаблоны, а затем сравнить их с буквами, не нужно будет заново
+     проходить по картинке. Просто будем брать структуру с координатами и
+   накладывать шаблон прямо на это место на картинке
+   - Оптимизация скорости распознавания буквы и шаблона.
+   Буквы бывают разного размера. Зная крайние точки буквы, можно посчитать
+   высоту и ширину буквы. А значит, мы не будем пытаться наложить шаблон "m"
+   на букву "i", поскольку у них принципиально разные размеры.
+
+**** Структура символа и массив структур символов
+
+   Как сохранить крайние координаты букв?
+   - создаем структуру для каждой буквы
+   - создаем массив для хранения этих структур
+   - при анализе пикселей будем сверять их координаты с уже имеющимися в
+     структуре, если структура как-то заполнена, конечно
+
+   По окончанию работы над буквой, мы должны получить заполненную полностью
+   структуру буквы и положить ее в массив.
+
+   #+NAME: array_of_letters
+   #+BEGIN_SRC lisp :noweb yes
+     (defstruct letter
+       up down left right)
+
+     (defparameter *array-of-letters* (make-array *array-of-letters-amount*))
+   #+END_SRC
+
+   Массив будем сразу заполнять пустыми структурами, а затем просто
+   заполнять их поля. Так же заведем индекс заполнения массива, чтоб не
+   приходилось каждый раз проходить по массиву в поиске незаполненной
+   структуры, и переменную, отображающую размер массива. Таким образом не
+   придется вручную менять размер массива во всех тестах программы.
+
+   #+NAME: fill_array
+   #+BEGIN_SRC lisp :noweb yes
+     (dotimes (i *array-of-letters-amount*)
+       (setf (aref *array-of-letters* i) (make-letter)))
+   #+END_SRC
+
+   Сохдадим глобальную переменную индекса массива - указателя его заполнения
+   по совместительству - и переменную размера массива. Значения указаны по
+   умолчанию.
+
+   #+NAME: array_of_letters_index
+   #+BEGIN_SRC lisp :noweb yes
+     (defparameter *array-of-letters-indx* 0)
+
+     (defparameter *array-of-letters-amount* 500)
+   #+END_SRC
+
+   Можно было бы использовать пулл, но пришлось бы все равно писать в пулл
+   как в обычный массив, потому что если использовать ~vector-pop~ и
+   ~vector-push~, то мы будем при каждом вызове ~automat~ использовать одну
+   и ту же структуру. Чтобы этого не делать, пришлось бы сначала ждать, пока
+   мы проанализируем вообще все символы и только потом класть их в пулл. К
+   тому же, всегда можно забыть, как нетипично  мы используем пулл, и
+   получить сложно отслеживаемые ошибки.
+
+**** Поиск крайних точек координат символа
+
+     Подробнее о сравнении координат пикселя и координат крайних точек буквы.
+     У нас может возникнуть 2 сценария:
+     1. Мы встречем пустой слот.
+     Если это так, то просто запишем туда координаты пикселя. При последующем
+     анализе буквы, слот скорее всего будет переписан. Но нам очень важно,
+     чтоб все 4 слота структуры были заполнены какими-то координатами, иначе
+     размеры буквы посчитать будет невозможно.
+
+     2. В остальных случаях мы действуем по следующему сценарию:
+     Мы последоватльено сравниваем ~x~ координату текущего пикселя с ~x~
+     координатами полей ~left~ и ~reight~, а ~y~ координату сравниваем с ~y~
+     координатой полей ~up~ ~down~.
+     Зачем мы это делаем? Дело в том, что один и тот же пиксель может
+     оказаться и самым верхним, и самым правым, например. Соотвтетсвенно, он
+     должен попасть и в поле ~up~, и в поле ~right~. В противном случае
+     структура не будет отражать реальных размеров буквы.
+
+     Обрати внимание, что для проверки условий используется
+     ~progn~,объединяющий ифы в единое выражение, а не ~cond~, поскольку
+     ~cond~ прекратил бы проверять условия, как только одно из них сработало
+     бы. А нам нужно, чтоб проверились все.
+
+     ~check-sides~ принимает на вход пиксель и стурктуру символа и возвращает ее
+     измененное представление структуры.
+
+   #+NAME: check_sides
+   #+BEGIN_SRC lisp :noweb yes
+     <<array_of_letters>>
+
+     (defun check-sides (pix struct)
+       (progn
+         (if (or (null (letter-up struct))
+                 (< (get-y pix) (get-y (letter-up struct))))
+             (setf (letter-up struct) pix))
+         (if (or (null (letter-down struct))
+                 (> (get-y pix) (get-y (letter-down struct))))
+             (setf (letter-down struct) pix))
+         (if (or (null (letter-left struct))
+                 (< (get-x pix) (get-x (letter-left struct))))
+             (setf (letter-left struct) pix))
+         (if (or (null (letter-right struct))
+                 (> (get-x pix) (get-x (letter-right struct))))
+             (progn
+               (setf (letter-right struct) pix)
+               struct)
+             struct)))
+
+     <<automat>>
+
+     ;; ТЕСТ на заполнение пустой структуры с последующим переписыванием слотов
+     (defun test-check-sides (amount-of-structs)
+       (setf *array-of-letters-indx* 0
+             ,*array-of-letters-amount* amount-of-structs)
+       <<fill_array>>
+       (let ((cur-struct (aref *array-of-letters* 1)))
+         (check-sides (make-pix 90 90) cur-struct)
+         (format t "~A ~% "cur-struct)
+         (check-sides (make-pix 30 40) cur-struct)
+         (format t "~A ~% "cur-struct)
+         (check-sides (make-pix 12 0) cur-struct)
+         (format t "~A ~% "cur-struct)
+         (check-sides (make-pix 14 32) cur-struct)
+         (format t "~A ~% "cur-struct)
+         (check-sides (make-pix 14 100) cur-struct)
+         (format t "~A ~% "cur-struct)
+         ))
+
+     ;; (test-check-sides 5)
+   #+END_SRC
+
+** Вырезание шаблонов.
+   Теперь, когда мы получили координаты каждой буквы - а буквой мы считаем
+   все, что не фон, - мы можем написать функцию, которая будет вырезать
+   шаблон из каринки и сохранять его в папку.
+
+**** crop-pattern
+     Для вырезания шаблона мы будем копировать нужные пиксели в отдельный
+     массив и сохранять его. Поскольку у нас координаты букв записаны без
+     всякого "запаса", то чтоб вырезать букву правильно, не обрубив ее
+     последние пиксели, мы прибавим пару пикселей к границам, если это
+     возможно. Мы же не хотим  вылететь за границы массива.
+
+     Ширина буквы рассчитывается как разница между координатами ~x~ левого и
+     правого края, а высота - как разница между ~y~ координатами верхнего и
+     нижнего края.
+
+     К тому же мы прибавим по паре пикселей к длине и ширине буквы, если это
+     возможно, чтоб был небольшой  "запас" и при вырезании часть символа не
+     срезалась бы.
+
+     ~crop-pattern~ универсален, поскольку принимает структуру пикселя и
+     массив пикселей изображения, из которого мы вырезаем шаблон. Единственное
+     ограничение: структура должна быть типа ~letter~, а массив должен
+     содержать пиксели изображения.
+
+     Функия возвращает массив пикселей вырезанного символа.
+     #+NAME: crop_pattern
+     #+BEGIN_SRC lisp :noweb yes
+         (defun crop-pattern (pix-struct image)
+           (let* ((up (letter-up pix-struct))
+                  (down (letter-down pix-struct))
+                  (right (letter-right pix-struct))
+                  (left (letter-left pix-struct))
+                  (y-start (if (or (= (get-y up) 0) (= (get-y up) 1))
+                               (get-y up)
+                               (- (get-y up) 2)))
+                  (x-start (if (or (= (get-x left) 0) (= (get-x left) 1))
+                               (get-x left)
+                               (- (get-x left) 2)))
+                  (y-end (if (or (= (get-y down) *max-y*) (= (get-y down) (- *max-y* 1)))
+                             (get-y down)
+                             (+ (get-y down) 2)))
+                  (x-end (if (or (= (get-x right) *max-x*) (= (get-x right) (- *max-x* 1)))
+                             (get-x right)
+                             (+ (get-x right) 2)))
+                  (height-pattern (- y-end y-start))
+                  (width-pattern (- x-end x-start))
+                  (colors-pattern 4)
+                  (pattern-dims (list height-pattern width-pattern colors-pattern))
+                  (pattern-image (make-array pattern-dims :element-type '(unsigned-byte 8))))
+             ;; (format t "pattern dims ~A ~%" pattern-dims)
+             ;; (format t "struct ~A ~%" pix-struct)
+             (do ((image-y y-start (incf image-y))
+                  (pattern-y 0 (incf pattern-y)))
+                 ((= image-y y-end))
+               (do ((image-x x-start (incf image-x))
+                    (pattern-x 0 (incf pattern-x)))
+                   ((= image-x x-end))
+                 (do ((z 0 (incf z)))
+                     ((= z colors-pattern))
+                   ;; (format t "mx ~A my ~A  px ~A py ~A ~%" image-x image-y
+                   ;;         pattern-x pattern-y)
+                   ;; (format t "mx ~A my ~A  px ~A py ~A ~%" image-x image-y
+                   ;;         pattern-x pattern-y)
+                   (setf (aref pattern-image pattern-y pattern-x z)
+                         (aref image image-y image-x z)))))
+             pattern-image))
+
+       ;; TECT для проверки crop-pattern отдельно от системы
+       (defun test-crop-alone (test-image-path pattern-image-path)
+         (setf *test-image-path* test-image-path
+               ,*test-image* (load-png *test-image-path*))
+         (let ((struct (make-letter)))
+           (setf (letter-up struct) (make-pix 90 0)
+                 (letter-down struct) (make-pix 90 50)
+                 (letter-left struct) (make-pix 100 0)
+                 (letter-right struct) (make-pix 150 80))
+           (let ((pattern (crop-pattern struct *test-image*)))
+             (destructuring-bind (height  width  &optional colors)
+                 (array-dimensions pattern)
+               (save-png width height pattern-image-path pattern)))))
+
+       ;; (test-crop-alone "~/r/prj/picture->text/aaa.png"
+       ;;                  "~/r/prj/picture->text/crops/pattern.png")
+
+         ;;ТЕСТ crop со всей системой без цикла
+       (defun test-crop-with-system (test-image-path pattern-image-path amount-of-structs r g b)
+         (setf *test-image-path* test-image-path
+               ,*test-image* (load-png *test-image-path*)
+               ,*array-of-letters-indx* 0
+               ,*array-of-letters-amount* amount-of-structs
+               ,*max-x* (- (array-dimension *test-image* 1) 1)
+               ,*max-y* (- (array-dimension *test-image* 0) 1)
+               ,*r* r
+               ,*b* b
+               ,*g* g)
+           <<fill_array>>
+           (find-letter *test-image*)
+           (let ((pattern (crop-pattern (aref *array-of-letters* 0) *test-image*)))
+             (destructuring-bind (height  width  &optional colors)
+                 (array-dimensions pattern)
+               (save-png width height *pattern-image-path* pattern))))
+
+       ;; (test-crop-with-system "~/r/prj/picture->text/aaa.png"
+       ;;                        "~/r/prj/picture->text/crops/pattern.png" 5 248 121 29)
+
+         ;; ТЕСТ crop-pattern со всей системой: задача вырезать все шаблоны по координатам в массиве
+       (defun test-crop-with-system-in-cycle
+           (test-image-path pattern-image-path amount-of-structs r g b)
+         (setf *test-image-path* test-image-path
+               ,*test-image* (load-png *test-image-path*)
+               ,*array-of-letters-indx* 0
+               ,*array-of-letters-amount* amount-of-structs
+               ,*max-x* (- (array-dimension *test-image* 1) 1)
+               ,*max-y* (- (array-dimension *test-image* 0) 1)
+               ,*r* r
+               ,*b* b
+               ,*g* g)
+         <<fill_array>>
+         (find-letter *test-image*)
+         (do ((i 0 (incf i)))
+             ((= i *array-of-letters-amount*) 'done)
+           (let* ((cur-struct (aref *array-of-letters* i))
+                  (pattern (if (letter-up cur-struct)
+                               (crop-pattern cur-struct *test-image*)
+                               nil)))
+             (if pattern
+                 (destructuring-bind (height width  &optional colors)
+                     (array-dimensions pattern)
+                   (save-png width height
+                             (format nil
+                                     "/home/ss/r/prj/picture->text/crops/pattern~A.png" i)
+                             pattern))
+                 (return-from test-crop-with-system-in-cycle 'done)))))
+
+       ;; (test-crop-with-system-in-cycle "~/r/prj/picture->text/aaa.png"
+       ;;                                 "~/r/prj/picture->text/crops/pattern~A.png" 400 248 121 29)
+
+       <<bst_funcs>>
+       <<xor-image>>
+     #+END_SRC
+
+** Удаление лишних шаблонов
+   Мы получили множество шаблонов разных сиволов. Многие из них повторяются, к тому
+   же не все из нх достаточно "удачные": где-то крешек срезался, где-то фона
+   слишком много, где-то край другой буквы оказался и т.д.
+
+   Нам нужно каким-то образом выбрать самый удачный шаблон и удалить все
+   ненужные, потому что в противном случае дальнейшее сравнение шаблона с
+   конкретным символом значительно увеличится во времени.
+
+   Чтоб понять, совпадают ли два шаблона, мы воспользуемся операцией ~xor~,
+   о ней можно прочитать в вики. Затем мы посмотрим, насколько именно
+   отличаются два шаблона, и если они отличаются незначительно, то мы будем
+   считать, что шаблоны одинаковые.
+   В этом случае мы "сольем" их в единый шаблон, получим таким образом нечто
+   среднее между первым и вторым шаблоном, а дубликаты будем
+   удалять.
+
+   Предполагается, что шаблоны нарезались процедурой ~crop-pattern~ и все
+   изображения-шаблоны имеют один путь и отличаются друг от друга только
+   порядковым номером. Если мы будем проверять шаблоны в цикле, используя их
+   общий путь и порядковый номер, то нам нужно где-то хранить, какие файлы
+   уже удалены, посольку в противном случае попытка проверить удаленный файл
+   приведет к ошибке. Мы не будем хранить весь путь удаленного шаблона, а
+   только его порядковый номер. Это открывает нам возможность хранения
+   идентификаторов шаблонов в дереве.
+
+**** Построение дерева удаленных (проанализированных) шаблонов
+     Сначала создадим функции для построения дерева и нахождения элементов в
+     нем.
+     Хранение в дереве более удобно, потому что в худшем случае сложность
+     алгоритма поиска идентификатора будет n/2, в то время как если хранить
+     идентификаторы в неупорядоченном списке, сложность будет возрастать
+     пропорционально количеству элементов в списке и в худшем случае нам
+     придется пройти его до конца.
+
+     #+NAME: bst_funcs
+     #+BEGIN_SRC lisp :noweb yes
+         (defstruct node
+           elt l r)
+
+         (defun bst-insert (bst obj fn)
+           (if (null bst)
+               (make-node :elt obj)
+               (let ((elt (node-elt bst)))
+                 (if (eql obj elt)
+                     bst
+                     (if (funcall fn obj elt)
+                         (make-node
+                          :elt elt
+                          :l (bst-insert (node-l bst) obj fn)
+                          :r (node-r bst))
+                         (make-node
+                          :elt elt
+                          :r (bst-insert (node-r bst) obj fn)
+                          :l (node-l bst)))))))
+
+         (defun bst-find (bst obj fn)
+           (if (null bst)
+               nil
+               (let ((elt (node-elt bst)))
+                 (if (eql obj elt)
+                     bst
+                     (if (funcall fn obj elt)
+                         (bst-find (node-l bst) obj fn)
+                         (bst-find (node-r bst) obj fn))))))
+
+         (defun test-bst-insert (list fn)
+           (let ((count (length list))
+                 (tree))
+             (dotimes (i count)
+               (setf tree (bst-insert tree (car list) fn))
+               (setf list (cdr list)))
+             tree))
+
+         ;; (test-bst-insert '(2 5 9 8 3 1) #'<)
+
+         (defun test-bst-find (list fn obj)
+           (let ((tree (test-bst-insert list fn)))
+             (bst-find tree obj fn)))
+
+         ;;(test-bst-find '(2 5 9 8 3 1 10 7) #'< 7)
+       <<merge_patterns>>
+     #+END_SRC
+
+**** Сливание шаблонов друг с другом
+     Теперь напишем процдуру, которая сольет 2 массива изображений в один,
+     чтоб у нас получилось нечто среднее между первым изображением и вторым.
+
+     ~merge-patterns~ принимает на вход 2 массива пикселей изображения и
+     возвращет массив пикселей изоражения, которое получилось в ходе сливания
+     двух исходных изобржений.
+
+     #+NAME: merge_patterns
+     #+BEGIN_SRC lisp :noweb yes
+         (defun merge-patterns (pattern1 pattern2)
+           ;;(format t "merged-patterns! ~%")
+           (destructuring-bind (height-pattern1 width-pattern1 colors-pattern1)
+               (array-dimensions pattern1)
+             (destructuring-bind (height-pattern2 width-pattern2 colors-pattern2)
+                 (array-dimensions pattern2)
+               (assert (and (equal height-pattern1 height-pattern2)
+                            (equal width-pattern1 width-pattern2)
+                            (equal colors-pattern1 colors-pattern2)))
+               (let ((merged-image (make-array (list height-pattern1
+                                                     width-pattern1 colors-pattern1)
+                                               :element-type '(unsigned-byte 8))))
+                 (do ((y 0 (incf y)))
+                     (( = y height-pattern1))
+                   (do ((x 0 (incf x)))
+                       ((= x width-pattern1))
+                     (do ((z 0 (incf z)))
+                         ((= z colors-pattern1))
+                       (setf (aref merged-image y x z)
+                             (round (float (/ (+ (aref pattern1 y x z)
+                                                 (aref pattern2 y x z)) 2)))))))
+                 merged-image))))
+
+         (defun test-merge-patterns (pattern1-path pattern2-path)
+           (let* ((pattern1 (load-png pattern1-path))
+                 (pattern2 (load-png pattern2-path))
+                 (merged-image (merge-patterns pattern1 pattern2)))
+                   (destructuring-bind (height width &optional colors)
+                       (array-dimensions merged-image)
+                     (save-png width height "/home/ss/r/prj/picture->text/merged-image.png"
+                               merged-image))))
+         ;; ТЕСТ с двумя одинаковыми шаблонами
+
+         ;; (test-merge-patterns "/home/ss/r/prj/picture->text/crops/pattern17.png"
+         ;;                      "/home/ss/r/prj/picture->text/crops/pattern61.png")
+
+         ;; ТЕСТ с двумя рзными шаблонами
+         ;; (test-merge-patterns "/home/ss/r/prj/picture->text/crops/pattern17.png"
+         ;;                      "/home/ss/r/prj/picture->text/crops/pattern32.png")
+
+         ;; ТЕСТ с двумя разными шаблонами разных размеров
+         ;; (test-merge-patterns "/home/ss/r/prj/picture->text/crops/pattern17.png"
+         ;;                      "/home/ss/r/prj/picture->text/crops/pattern66.png")
+
+     #+END_SRC
+
+**** Ксор изображений
+     Мы заявили, что сравнивать изображения мы будем с помощью операции ~xor~
+     Создадим функцию, которая занимается ксором двух изобржений. Нам она
+     понадобится, чтоб в дальнейшем определить, сколько пикселей двух
+     изображений совпадают на 100%. Пиксели одного цвета после ~xor~ станут
+     черными.
+
+     Процедура принимает шаблон, изображение, и координаты, откуда начнется
+     ~xor~. Ввод конкретных координат позволяет ксорить только ту часть
+     изображения, которая необходима. Это пригодится нам, когда мы будем
+     накладывать маленкий шаблон на координаты символа, который находится на
+     более крупном изображении.
+
+     Возвращает массив пикселей сксоренного изображения.
+
+     #+NAME: xor-image
+     #+BEGIN_SRC lisp :noweb yes
+       (defun xor-image (y-start y-end x-start x-end pattern image)
+         (destructuring-bind (height-pattern width-pattern colors-pattern)
+             (array-dimensions pattern)
+           (let ((xored-symbol-array (make-array (list height-pattern width-pattern
+                                                       colors-pattern)
+                                                 :element-type '(unsigned-byte 8))))
+             ;; осуществляем xor пикселей
+             (do ((image-y y-start (incf image-y))
+                  (xored-y 0 (incf xored-y))
+                  (pattern-y 0 (incf pattern-y)))
+                 ((= image-y y-end))
+               (do ((image-x x-start (incf image-x))
+                    (xored-x 0 (incf xored-x))
+                    (pattern-x 0 (incf pattern-x)))
+                   ((= image-x x-end))
+                 (do ((z 0 (incf z)))
+                     ((= z 2))
+                   (setf (aref xored-symbol-array xored-y xored-x z)
+                         (logxor (aref image image-y image-x z)
+                                 (aref pattern pattern-y pattern-x z))))))
+             ;; поправляем альфа-канал
+             (do ((y 0 (incf y)))
+                 ((= y height-pattern))
+               (do ((x 0 (incf x)))
+                   ((= x width-pattern))
+                 (setf (aref xored-symbol-array y x 3) 255)))
+             xored-symbol-array)))
+
+       ;; ТЕСТ ксора двух изображений совместно в automat
+       (defun test-xor-image (test-image-path new-image-path save-crop-path amount-of-structs
+                              r g b)
+         (test-automat-with-find-letter test-image-path new-image-path amount-of-structs
+                                        r g b)
+         (let ((test-image (load-png test-image-path))
+               (result-image (load-png new-image-path)))
+           (destructuring-bind (height width colors)
+               (array-dimensions result-image)
+             (let ((xored-image (xor-image 0 (- height 1) 0 (- width 1) result-image
+                                           test-image)))
+               (destructuring-bind (height-xored width-xored &optional colors)
+                   (array-dimensions xored-image)
+                 (save-png width-xored height-xored save-crop-path xored-image)))
+             )))
+
+       ;; (test-xor-image "~/r/prj/picture->text/aaa.png" "~/r/prj/picture->text/result.png"
+       ;;                 "~/r/prj/picture->text/xor.png"
+       ;;                 500 248 121 29)
+
+       <<count_inaccuracy>>
+     #+END_SRC
+
+**** Подсчет погрешности
+     Чтоб установить, насколько похожи два изображения, надо не только
+     сксорить их, но и посчитать, сколько пикселей совпадают на 100%. Мы могли
+     бы считать, что совпадение всех пикселей должно быть на 100%, но есть
+     подозрение, что такое совпадение изображений будет встречаться
+     редко. Поэтому мы воодим понятие погрешности, т.е. сколько пикселей могут
+     не совпадать.
+
+     Раз нас интересует погрешность, то хорошо бы создать отдельную функцию,
+     которая бы считала, сколько пикселей "не такие", инаыми словами,
+     находится ли данное изображение в пределах допустимой нормы или нет.
+
+     Функция ~count-inaccuracy~ будет принимать на вход число, обозначающее
+     допустимую погрешность в процентах, и изображение.
+
+     Алгоритм следующий:
+     - вычислить какое количество несовпадающих пикселей мы считаем
+       допустимым. Например, если задано, что погрешность 20%, а мы имеем
+       изображение на 100 пикселей, то мы считаем, что приемлимая
+       погрешность - 20 пикселей.
+     - запустить цикл, который проверяет цвет пикселя. Если он черный, значит
+       операция ~xor~ двух пикселей из исходных массивов дала 0, т.е. пиксели
+       совпали по цвету. Соотвтетсвенно, чем больше черных пикселей, тем
+       больше совпадающих пикселей.
+
+     Возвращаем процент погрешности у конкретного изображения, поскольку потом мы будем
+     искать наиболее подходящий шаблон. Т.е. тот, который максимально
+     совпадает с заданным символом, а значит имеет наименьшую погрешность.
+
+     #+NAME: count_inaccuracy
+     #+BEGIN_SRC lisp :noweb yes
+       (defun count-inaccuracy (inaccuracy xored-image)
+         (destructuring-bind (height width &optional colors)
+             (array-dimensions xored-image)
+           (let ((pix-inaccuracy-start (float (* (/ (* height width) 100) inaccuracy)))
+                 (pix-inaccuracy-end 0))
+             ;; (format t "count-inaccuracy: start ~A ~%" pix-inaccuracy-start)
+             (do ((y 0 (incf y)))
+                 ((= y height))
+               (do ((x 0 (incf x)))
+                   ((= x width))
+                 (if (not (= (aref xored-image y x 0)
+                             (aref xored-image y x 1)
+                             (aref xored-image y x 2)
+                             0))
+                     (progn
+                       (incf pix-inaccuracy-end)
+                       ;;(format t "count-inaccuracy: ~A ~%" pix-inaccuracy-end)
+                       (if (> pix-inaccuracy-end pix-inaccuracy-start)
+                           (return-from count-inaccuracy
+                             (float (/ (* pix-inaccuracy-end 100) (* height width)))))))))
+             ;; (format t "count-inaccuracy: ~A ~%" pix-inaccuracy-end)
+             ;; (format t "count-inaccuracy: height ~A width ~A ~%" height width)
+             (float (/ (* pix-inaccuracy-end 100) (* height width))))))
+
+
+       ;;ТЕСТ count-inaccuracy на 100% совпадающем изображении (ксорим 2 одианковых изображения)
+       (defun test-count-inaccuracy (path1 path2 xor-path inaccuracy)
+         (let ((test-image1 (load-png path1))
+               (test-image2 (load-png path2)))
+           (destructuring-bind (height width colors)
+               (array-dimensions test-image2)
+             (let ((xored-image (xor-image 0 (- height 1) 0 (- width 1) test-image1
+                                           test-image2)))
+               (destructuring-bind (height-xored width-xored &optional colors)
+                   (array-dimensions xored-image)
+                 (save-png width-xored height-xored
+                           xor-path xored-image))
+               (count-inaccuracy inaccuracy xored-image)))))
+
+       ;; (test-count-inaccuracy "/home/ss/r/prj/picture->text/rrr/pattern19.png"
+       ;;                        "/home/ss/r/prj/picture->text/rrr/pattern21.png"
+       ;;                        "/home/ss/r/prj/picture->text/xor.png"  20)
+
+       <<ready_patterns>>
+
+     #+END_SRC
+
+**** Сделать окончательные шаблоны
+     Теперь можно собрать это в единый механизм, который сольет одинаковые
+     шаблоны в единый шаблон и удалит все дубликаты шаблонов.
+     Для простоты понимания и отладки, разобьем процедуру на несколько
+     подпроцедур.
+
+     ~merdge-and-delete-patterns~:
+     - принимает массив шаблона, дерево идентификаторов удаленных шаблонов и
+     итерационный счетчик
+     - возвращает массив окончательного шаблона и дерево удаленных
+       идентификаторов
+
+     Что делает ~merdge-and-delete-patterns~:
+     - сравнивает текущий шаблон с другими
+     - удаляет дубликат из папки, если шаблоны оинаковые (этого временно нет)
+     - помещает идентификатор удаленного дубликата в дерево
+
+     ~iter~ принимает дерево идентификаторов и итерационный счетчик, возвращает 'done:
+     - проверяет наличие текущего идентификатора шаблонов в дереве
+     - если идентификатор там есть, значит файл уже удален и попытка загрузить
+       массив пикселей приведет к ошибке
+     - если идентификатора нет, загружает массив пикселей и вызывает
+     ~merdge-and-delete-patterns~
+     Процесс повторяется до тех пор, пока идентификатор не станет меньше нуля,
+     т.е. мы проверим все шаблоны.
+
+     По окончанию работы функции все заготовки шаблонов должны исчезнуть из
+     текущей папки, а готовые шаблоны должны оказаться в другой папке.
+
+     Что сохраняет отработанный шаблон дважды? Последовательность 0 0 1
+
+     #+NAME: ready_patterns
+     #+BEGIN_SRC lisp :noweb yes
+       (defun make-patterns (patterns-path inaccuracy dir-ready-patterns-path num-patterns)
+         (defun merdge-and-save-patterns (cur-pattern deleted-patterns-tree n)
+           (cond ((< n 0) (values cur-pattern deleted-patterns-tree))
+                 ((bst-find deleted-patterns-tree n #'>)
+                  (merdge-and-save-patterns
+                   cur-pattern deleted-patterns-tree (- n 1)))
+                 (t
+                  (let* ((next-pattern (load-png (format nil patterns-path n))))
+                    (destructuring-bind (height-next width-next &optional colors-next)
+                        (array-dimensions next-pattern)
+                      (destructuring-bind (height-cur width-cur &optional colors-cur)
+                          (array-dimensions cur-pattern)
+                        (if (and (equal height-next height-cur)
+                                 (equal width-next width-cur))
+                            (let* ((xored-image (xor-image 0 (- height-next 1) 0 (- width-next 1)
+                                                           next-pattern cur-pattern))
+                                   (cur-inaccuracy (count-inaccuracy inaccuracy xored-image)))
+                              ;; (format t
+                              ;; "make-patterns: n ~A cur-inaccuracy ~A inaccuracy ~A ~%" n
+                              ;;         cur-inaccuracy inaccuracy)
+                              (if (< cur-inaccuracy inaccuracy)
+                                  (progn
+                                    ;; (format t "merged! ~%")
+                                    (merdge-and-save-patterns
+                                     (merge-patterns cur-pattern next-pattern)
+                                     (bst-insert deleted-patterns-tree n #'>)
+                                     (- n 1)))
+                                  (progn
+                                    ;; (format t "not merged! ~%")
+                                    (merdge-and-save-patterns cur-pattern deleted-patterns-tree
+                                                              (- n 1)))))
+                            (progn
+                              ;; (format t "not equal! n ~A ~%" n)
+                              (merdge-and-save-patterns
+                               cur-pattern deleted-patterns-tree (- n 1))))))))))
+         (defun iter (deleted-patterns-tree n)
+           (cond ((< n 1) ;; (format t "~A "deleted-patterns-tree))
+                  'done)
+                 ((bst-find deleted-patterns-tree n #'>)
+                  (progn
+                    ;; (format t "~% iter: pattern n ~A is deleted ~%" n)
+                    (iter deleted-patterns-tree (- n 1))))
+                 (t
+                  (let ((cur-pattern (load-png (format nil patterns-path n))))
+                    ;; (format t "~% iter: pattern n ~A ~%" n)
+                    (multiple-value-bind (merged-pattern tree)
+                        (merdge-and-save-patterns cur-pattern deleted-patterns-tree (- n 1))
+                      (destructuring-bind (height width &optional colors)
+                          (array-dimensions merged-pattern)
+                        ;;  (format t dir-ready-patterns-path n)
+                        (save-png width height
+                                  (format nil dir-ready-patterns-path n) merged-pattern)
+                        (setf deleted-patterns-tree (bst-insert tree n #'>))
+                        ;; (format t " ~% n ~A: ~A ~%" n deleted-patterns-tree)
+                        (iter deleted-patterns-tree (- n 1))))))))
+         (iter '() num-patterns))
+
+       ;;ТЕСТ без интегрирования в систему (все шаблоны вырезаны заранее и положены в папку)
+       ;; (make-patterns "/home/ss/r/prj/picture->text/crops/pattern~A.png" 5
+       ;;                "/home/ss/r/prj/picture->text/patterns/pattern~A.png" 3)
+
+       ;; ТЕСТ c интегрированием в систему
+       (defun test-make-patterns-with-system (test-image-path crops-path patterns-path inaccuracy
+                                              amount-of-structs r g b nums-pattern)
+         (test-crop-with-system-in-cycle
+          test-image-path patterns-path amount-of-structs r g b)
+         (make-patterns crops-path inaccuracy patterns-path nums-pattern))
+
+       ;; (test-make-patterns-with-system "/home/ss/r/prj/picture->text/aaa.png"
+       ;;                                 "/home/ss/r/prj/picture->text/crops/pattern~A.png"
+       ;;                                 "/home/ss/r/prj/picture->text/patterns/pattern~A.png" 4
+       ;;                                 500 248 121 29 50)
+
+       <<compare>>
+       <<accordance_pattern_symbol>>
+     #+END_SRC
+
+** Установление соответствия между шаблоном и буквой
+   Мы получили готовые шаблоны. Теперь нам нужно каким-то образов сообщить
+   системе, какой шаблон какой букве соответствует.
+
+   Один из вариантов:
+   - пользователь самостоятельно, вручную меняет имена у шаблонов.
+   То есть был "pattern1.png", а стал "pattern_a.png", к примеру, поскольку
+   на нем изображена буква "a".
+   - затем после сравнения шаблона с символом на картинке мы будем
+     отбрасывать последние 4 символа у строки пути - это всегда будет ".png"
+     и будем получать символ, который, изображен на шаблоне и записывать его
+     в выходной файл.
+
+   Напишем функцию, которая будет получать необходимый символ из пути
+   файла.
+   К примеру, если функция получила на вход путь "patterns/4.png", то вернет
+   "4".
+
+   #+NAME: accordance_pattern_symbol
+   #+BEGIN_SRC lisp :noweb yes
+       (defun get-symbol-from-the-path (pathname)
+         (let ((substring (subseq pathname (- (length pathname) 5))))
+           (aref substring 0)))
+
+
+       ;; (get-symbol-from-the-path "/home/ss/r/prj/picture->text/patterns/4.png")
+
+       ;; (get-symbol-from-the-path "/home/ss/r/patterns/4.png")
+
+     <<write_down_symbol>>
+   #+END_SRC
+
+   Создадим сразу функцию, которая будет принимать на фход символ или строку
+   и печатать их в выходной файл.
+
+   #+NAME: write_down_symbol
+   #+BEGIN_SRC lisp :noweb yes
+     (defun write-down (string file)
+       (let ((path (make-pathname :name file)))
+         (with-open-file (str path :direction :output
+                              :if-exists :supersede)
+
+           (format str "~A" string)))
+         'done)
+
+     ;; (write-down "abdhjklds" "test-file.txt")
+   #+END_SRC
+
+** Сравнение шаблонов и символов
+   Итак, мы получили много разных шаблонов. Как их сравнить с имеющимя
+   текстом на картинке?
+
+   Мы помним, что массив структур все еще заполнен и каждая структура хранит
+   в себе координаты найденных символов. Значит, мы будем брать координаты
+   из каждой структуры, находить символ и сравнивать его с шаблонами по
+   очереди до тех пор, пока не сочтем совпадение приемлимым.
+
+   Сравнивать мы будем с помощью процедуры ~xor-image~, с помощью которой искали
+   похожие шаблоны между собой, и ~count-inaccuracy~, которая считала
+   количество нечерных пикселей на полученном изображении.
+
+**** Функция сравнения
+     Теперь соберем это все в единый механизм и создадим ~compare~. С помощью
+     функции  ~xor-image~ мы будем последовательно накладывать шаблон на
+     символ, который найдем на общем изображении по его координатам, а с
+     помощью ~count-inaccuracy~ выберем самый удачный шаблон.
+
+     При этом соблюдем несколько правил:
+     - если шаблон и найденный символ не одной высоты и ширины, то сравнивать
+       нет смысла, берем следующий шаблон
+     - если при сравнении количество "не тех" пикселей превысило допустимую
+       погрешность, перестаем анализировать, берем следующий шаблон.
+     - если мы смогли проанализировать изображение до конца, то считаем данный
+       результат релевантным и сохранем его. При этом продолжаем искать более
+       удачный результат. Если такогового нет, возвращаем текущий.
+     - если шаблоны кончились, а соответствие не нашли, то мы возвращаем
+       сообщение об ошибке с координатами символа, для которого не нашлось
+       соответствия
+
+     Пока что будем просто возвращать путь шаблона, который подошел, и
+     значение погрешности.
+
+     #+NAME: compare
+     #+BEGIN_SRC lisp :noweb yes
+       (defun compare-iter (y-start y-end x-start x-end height-symbol width-symbol
+                            inaccuracy  patterns-path-list pattern-result image)
+         ;; (format t patterns-path num-patterns)
+         (cond ((and  (null patterns-path-list) (null pattern-result)) nil)
+               ((and (null patterns-path-list) pattern-result) pattern-result)
+               (t
+                (let ((pattern-array (load-png (car patterns-path-list))))
+                  (destructuring-bind (height-array width-array &optional colors-array)
+                      (array-dimensions pattern-array)
+                    (if (and (equal height-array height-symbol)
+                             (equal width-array width-symbol))
+                        (progn
+                          ;;(format t "~% true1 ~%")
+                          (let* ((xored-image (xor-image y-start y-end x-start x-end
+                                                         pattern-array image))
+                                 (cur-inaccuracy (count-inaccuracy inaccuracy xored-image)))
+                            ;; (format t "~A ~A ~% " pattern-result cur-inaccuracy)
+                            (if (or (and (null pattern-result) ( < cur-inaccuracy inaccuracy))
+                                    (and pattern-result
+                                         (< cur-inaccuracy (cadr pattern-result))))
+                                (progn
+                                  ;;(format t "true2 ~%")
+                                  (setf pattern-result (list (car patterns-path-list)
+                                                             cur-inaccuracy))
+                                  (compare-iter
+                                   y-start y-end x-start x-end height-symbol width-symbol
+                                   inaccuracy (cdr patterns-path-list) pattern-result image))
+                                (compare-iter
+                                 y-start y-end x-start x-end height-symbol width-symbol
+                                 inaccuracy (cdr patterns-path-list) pattern-result image )))
+                          )
+                        (compare-iter y-start y-end x-start x-end height-symbol width-symbol
+                                      inaccuracy (cdr patterns-path-list) pattern-result
+                                      image)))))))
+
+       (defun compare (image symbol-struct patterns-path-list inaccuracy)
+         (let* ((up (letter-up symbol-struct))
+                (down (letter-down symbol-struct))
+                (right (letter-right symbol-struct))
+                (left (letter-left symbol-struct))
+                (y-start (if (or (= (get-y up) 0) (= (get-y up) 1))
+                             (get-y up)
+                             (- (get-y up) 2)))
+                (x-start (if (or (= (get-x left) 0) (= (get-x left) 1))
+                             (get-x left)
+                             (- (get-x left) 2)))
+                (y-end (if (or (= (get-y down) *max-y*) (= (get-y down) (- *max-y* 1)))
+                           (get-y down)
+                           (+ (get-y down) 2)))
+                (x-end (if (or (= (get-x right) *max-x*) (= (get-x right) (- *max-x* 1)))
+                           (get-x right)
+                           (+ (get-x right) 2)))
+                (height-symbol (- y-end y-start))
+                (width-symbol (- x-end x-start)))
+           (compare-iter y-start y-end x-start x-end height-symbol width-symbol
+                 inaccuracy patterns-path-list '() image)))
+
+
+       ;; ТЕСТ с двумя одинаковыми изображениями
+       ;; вырезает шаблон и накладывается на свои же координаты
+       (defun test-compare-same-images (test-image-path pattern-image-path inaccuracy)
+         (setf *test-image-path* test-image-path
+               ,*test-image* (load-png *test-image-path*))
+         (let ((struct (make-letter)))
+           (setf (letter-up struct) (make-pix 90 0)
+                 (letter-down struct) (make-pix 90 50)
+                 (letter-left struct) (make-pix 100 0)
+                 (letter-right struct) (make-pix 150 80))
+           (let ((pattern (crop-pattern struct *test-image*)))
+             (destructuring-bind (height  width  &optional colors)
+                 (array-dimensions pattern)
+               (save-png width height pattern-image-path pattern)))
+           (compare *test-image* struct (list pattern-image-path) inaccuracy)))
+
+       ;; (test-compare-same-images "/home/ss/r/prj/picture->text/aaa.png"
+       ;;                           "/home/ss/r/prj/picture->text/pattern.png" 20)
+
+       ;; ТЕСТ сравнения одного изображения с разными шаблонами
+       ;; шаблоны вырезаны заранее
+       (defun test-compare-one-image-few-patterns
+           (test-image-path pattern-image-path amount-of-structs r g b inaccuracy)
+         (setf *test-image-path* test-image-path
+               ,*test-image* (load-png *test-image-path*)
+               ,*max-x* (- (array-dimension *test-image* 1) 1)
+               ,*max-y* (- (array-dimension *test-image* 0) 1)
+               ,*array-of-letters-indx* 0
+               ,*array-of-letters-amount* amount-of-structs
+               ,*r* r
+               ,*b* b
+               ,*g* g)
+         (dotimes (i *array-of-letters-amount*)
+           (setf (aref *array-of-letters* i) (make-letter)))
+         (find-letter *test-image*)
+         (compare *test-image* (aref *array-of-letters* 1) pattern-image-path inaccuracy))
+
+       ;; (test-compare-one-image-few-patterns
+       ;;  "/home/ss/r/prj/picture->text/aaa.png"
+       ;;  (list
+       ;;   "/home/ss/r/prj/picture->text/patterns/pattern1.png"
+       ;;   "/home/ss/r/prj/picture->text/patterns/pattern2.png"
+       ;;   "/home/ss/r/prj/picture->text/patterns/pattern3.png"
+       ;;   "/home/ss/r/prj/picture->text/patterns/pattern4.png")
+       ;;  500 248 121 29 30)
+     #+END_SRC
+
+** Запуск системы
+
+   Здесь представлен тестовый запуск системы.
+
+   ~Для корректного тестирования необходимо:~
+   - посмотреть главу WARNING!
+   - иметь тестовое изображение
+   - проверить все пути, по кторым будут сохранены шаблоны
+   - установить значения цвета для текста и допустимую погрешность цвета
+     (пипетка в гимпе в помощь)
+
+   Алгоритм работы всей системы (сжато):
+   - загрузить массив в глобальную переменную (доступ к массиву должен быть
+     у всех функций)
+   - установить максимальные значения ~x~ и ~y~ в соответствии с
+     размерностью массива, значения глобальные
+   - установить цвет текста автоматически (временно отсутствует)
+   - установить размер массив для хранения структур координат символов - глобально
+   - заполнить массив для хранения структур пустыми структурами
+   - установить индекс этого массива в 0 - глоабально
+   - запуск функции ~find-letter~: на выходе получаем заполненный массив
+     структур. Структуры заполнены координатами символов, который нашел
+     ~automat~, запущенный внутри  ~find-letter~
+   - вызов ~crop-pattern~ - получаем папку, заполненную вырезанными
+     символами.
+   - вызов ~make-patterns~ - получаем другую папку, заполненную готовыми
+     шаблонами
+   - пользоватль вручную переименовывает шаблоны в соответствии с тем, что
+     на них изображено. Осорожно с путями: они еще могут понадобиться.
+   - создаем пустую строку для символов, полученных в будущем. Будем
+     подсоединять их по одному.
+   - вызов ~compare~ в цикле - возвращает путь каждого шаблона для каждого символа
+     или же nil, если пути не нашлось
+     - вызов ~get-symbol-from-the-path~ - получаем символ из пути шаблона
+     - записываем его в общую строку символов
+   - когда проанализированы все символы с картинки, вызываем ~write-down~ и
+     записываем все символы в файл
+
+   Разделим запуск на два этапа, между которыми пользователь будет
+   переименовывать шаблоны вручную (хорошо бы от этого как-то избавиться).
+
+**** Первая ступень запуска
+
+     #+NAME: collect_patterns
+     #+BEGIN_SRC lisp :noweb yes
+       (defun crop-all-patterns (patterns-path)
+         (do ((i 0 (incf i)))
+             ((= i *array-of-letters-amount*) (- i 1 ))
+           (let* ((cur-struct (aref *array-of-letters* i))
+                  (pattern (if (letter-up cur-struct)
+                               (crop-pattern cur-struct *test-image*)
+                               nil)))
+             ;;(format t "pattern! ~%")
+             (if pattern
+                 (destructuring-bind (height width  &optional colors)
+                     (array-dimensions pattern)
+                   (save-png width height
+                             (format nil
+                                     patterns-path i)
+                             pattern))
+                 (return-from crop-all-patterns (- i 1))))))
+
+
+       (defun collect-patterns (image-path crops-path final-patterns-path size-array-letters
+                                r g b cur-color-tolerance pix-inaccuracy)
+         (setf *test-image-path* image-path
+               ,*test-image* (load-png *test-image-path*)
+               ,*array-of-letters-amount* size-array-letters
+               ,*array-of-letters-indx* 0
+               ,*color-tolerance* cur-color-tolerance
+               ,*max-x* (- (array-dimension *test-image* 1) 1)
+               ,*max-y* (- (array-dimension *test-image* 0) 1)
+               ,*r* r
+               ,*b* b
+               ,*g* g)
+         (dotimes (i *array-of-letters-amount*)
+           (setf (aref *array-of-letters* i) (make-letter)))
+           (find-letter *test-image*)
+           (let ((amount-of-crops
+                  (crop-all-patterns crops-path)))
+             (make-patterns crops-path pix-inaccuracy final-patterns-path amount-of-crops)
+             (format
+              t
+              "~% collect-patterns: I'm done. Please, rename patterns correctly for next job ~%")
+             ))
+
+       ;; ЗАПУСК первой ступени
+
+       ;; (collect-patterns "/home/ss/r/prj/picture->text/test.png"
+       ;;                   "/home/ss/r/prj/picture->text/crops/pattern~A.png"
+       ;;                   "/home/ss/r/prj/picture->text/patterns/pattern~A.png"
+       ;;                   500 248 121 29 100 5)
+     #+END_SRC
+
+**** Вторая ступень запуска
+     Вот мы переименовали шаблоны. Теперь можно сравнить шаблоны с имеющимися
+     символами.
+
+
+     #+NAME: compare_patterns_and_image
+     #+BEGIN_SRC lisp :noweb yes
+       (defun change-cur-work-dir (work-dir-path)
+         (sb-posix:chdir work-dir-path)
+         (setf *default-pathname-defaults* (sb-ext:native-pathname
+                                            (format nil "~A~A" (sb-posix:getcwd) "/"))))
+
+       (defun compare-all-symbols (patterns-dir-path image inaccuracy)
+         (defun compare-all-symbols-iter (list-of-patterns-path symbols-string i)
+           (if (= i *array-of-letters-amount*)
+               symbols-string
+               (let* ((cur-symbol-struct (aref *array-of-letters* i)))
+                 (if (not (letter-up cur-symbol-struct))
+                     (return-from compare-all-symbols-iter symbols-string)
+                     (let ((cur-pattern-path (compare image cur-symbol-struct
+                                                      list-of-patterns-path inaccuracy)))
+                       (if cur-pattern-path
+                           (progn
+                             ;;(format t "~A ~%" (car cur-pattern-path))
+                             (let ((cur-symbol (get-symbol-from-the-path
+                                                (format nil "~A"(car cur-pattern-path)))))
+                               (setf symbols-string (concatenate 'string symbols-string
+                                                                 (format nil "~A"
+                                                                         cur-symbol)))
+                               (compare-all-symbols-iter
+                                list-of-patterns-path symbols-string (incf i))))
+                           (compare-all-symbols-iter
+                            list-of-patterns-path symbols-string (incf i))))))))
+         (change-cur-work-dir patterns-dir-path)
+         (let ((all-patterns-paths-list (uiop:directory-files "./"))
+               (all-symbols-string ""))
+           (compare-all-symbols-iter all-patterns-paths-list all-symbols-string 0)))
+
+       (defun compare-and-write-down-all-symbols (patterns-dir-path image inaccuracy text-file)
+         (write-down (compare-all-symbols patterns-dir-path image inaccuracy)
+                     text-file))
+
+       ;; ЗАПУСК второй ступени
+       ;; (compare-and-write-down-all-symbols "/home/ss/r/prj/picture->text/patterns"
+       ;;                                     *test-image* 5 "file.txt")
+     #+END_SRC
+
+** Сборка файла
+
+   #+NAME: recognition
+   #+BEGIN_SRC lisp :tangle code-file.lisp :noweb yes tangle :exports code :padline no :comments none
+     <<defs>>
+     <<check_sides>>
+     <<find-letter>>
+     <<collect_patterns>>
+     <<compare_patterns_and_image>>
+   #+END_SRC
